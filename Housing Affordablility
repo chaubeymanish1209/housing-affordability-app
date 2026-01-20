@@ -1,0 +1,433 @@
+"""
+Housing Affordability Index - Streamlit Web Application
+Built for Magicbricks Research Team
+Converts Excel Model into Interactive Web App
+"""
+
+import streamlit as st
+import pandas as pd
+import numpy as np
+from datetime import datetime
+
+# ============================================================================
+# PAGE CONFIGURATION
+# ============================================================================
+st.set_page_config(
+    page_title="Housing Affordability Index",
+    page_icon="🏠",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# ============================================================================
+# CITY DATABASE (from Excel Assumptions Sheet)
+# ============================================================================
+CITIES_DATA = {
+    'Ahmedabad': 6727,
+    'Bengaluru': 12800,
+    'Chennai': 10185,
+    'Greater Noida': 9892,
+    'Gurugram': 16693,
+    'Hyderabad': 9122,
+    'Kolkata': 8632,
+    'Mumbai': 37906,
+    'Navi Mumbai': 14757,
+    'New Delhi': 20424,
+    'Noida': 14018,
+    'Pune': 12785,
+    'Thane': 15654,
+}
+
+# ============================================================================
+# CORE CALCULATION FUNCTIONS
+# ============================================================================
+
+def calculate_emi(principal, annual_rate, tenure_years):
+    """
+    Calculate monthly EMI using standard loan formula
+    EMI = P × r × (1+r)^n / ((1+r)^n - 1)
+    
+    Args:
+        principal: Loan amount in INR
+        annual_rate: Annual interest rate (%)
+        tenure_years: Loan tenure in years
+    
+    Returns:
+        Monthly EMI amount
+    """
+    if principal == 0 or annual_rate == 0:
+        return 0
+    
+    monthly_rate = annual_rate / 12 / 100
+    num_months = tenure_years * 12
+    
+    if monthly_rate == 0:
+        return principal / num_months
+    
+    emi = principal * monthly_rate * (1 + monthly_rate) ** num_months / \
+          ((1 + monthly_rate) ** num_months - 1)
+    
+    return emi
+
+
+def calculate_affordability(annual_income, home_size, ltv_percent, 
+                           annual_rate, tenure_years, city_price_per_sqft):
+    """
+    Calculate affordability metrics for a given city
+    
+    Returns:
+        Dictionary with all affordability metrics
+    """
+    
+    # House Price Calculation
+    house_price = home_size * city_price_per_sqft
+    
+    # Loan Amount (only LTV% of house price)
+    loan_amount = house_price * (ltv_percent / 100)
+    
+    # Monthly EMI
+    monthly_emi = calculate_emi(loan_amount, annual_rate, tenure_years)
+    
+    # Monthly Income
+    monthly_income = annual_income / 12
+    
+    # P/I Ratio (Price-to-Income)
+    pi_ratio = house_price / annual_income if annual_income > 0 else 0
+    
+    # EMI-to-Income Ratio (%)
+    emi_to_income = (monthly_emi / monthly_income * 100) if monthly_income > 0 else 0
+    
+    # Affordability Classification - P/I
+    if pi_ratio <= 5:
+        pi_status = "Affordable"
+        pi_color = "green"
+    elif pi_ratio <= 8:
+        pi_status = "Mid"
+        pi_color = "orange"
+    else:
+        pi_status = "Unaffordable"
+        pi_color = "red"
+    
+    # Affordability Classification - EMI
+    if emi_to_income <= 50:
+        emi_status = "Comfortable"
+        emi_color = "green"
+    else:
+        emi_status = "High Stress"
+        emi_color = "red"
+    
+    return {
+        'House Price': house_price,
+        'Loan Amount': loan_amount,
+        'Monthly EMI': monthly_emi,
+        'P/I Ratio': pi_ratio,
+        'P/I Status': pi_status,
+        'P/I Color': pi_color,
+        'EMI/Income %': emi_to_income,
+        'EMI Status': emi_status,
+        'EMI Color': emi_color,
+    }
+
+
+# ============================================================================
+# STREAMLIT UI - HEADER & INTRO
+# ============================================================================
+
+st.markdown("""
+    <div style='text-align: center; padding: 20px;'>
+        <h1>🏠 Housing Affordability Index</h1>
+        <p style='font-size: 16px; color: #666;'>
+            Magicbricks Research Tool | City-wise Home Affordability Analysis
+        </p>
+        <hr style='border: 1px solid #ddd; margin: 20px 0;'>
+    </div>
+""", unsafe_allow_html=True)
+
+# ============================================================================
+# INPUT FORM SECTION
+# ============================================================================
+
+st.markdown("### 📋 Enter Your Details")
+
+col1, col2 = st.columns(2)
+
+with col1:
+    annual_income = st.number_input(
+        "💰 Annual In-Hand Income (₹)",
+        min_value=500000,
+        value=2000000,
+        step=100000,
+        help="Your net annual income after tax"
+    )
+    
+    home_size = st.number_input(
+        "📐 Home Size (Super Built-up Area in sq ft)",
+        min_value=500,
+        value=1500,
+        step=100,
+        help="Total area you are planning to buy"
+    )
+    
+    ltv_percent = st.slider(
+        "🔄 Loan-to-Value Ratio (%)",
+        min_value=50,
+        max_value=90,
+        value=80,
+        step=5,
+        help="Percentage of home price you want to borrow (80% = ₹80 loan, ₹20 down payment)"
+    )
+
+with col2:
+    annual_rate = st.number_input(
+        "📊 Home Loan Interest Rate (% per annum)",
+        min_value=6.0,
+        max_value=10.0,
+        value=8.5,
+        step=0.1,
+        help="Interest rate offered by your bank"
+    )
+    
+    tenure_years = st.slider(
+        "⏰ Loan Tenure (Years)",
+        min_value=5,
+        max_value=30,
+        value=20,
+        step=1,
+        help="Number of years to repay the loan"
+    )
+    
+    require_loan = st.radio(
+        "🏦 Do you require a home loan?",
+        options=["Yes", "No"],
+        horizontal=True,
+        help="Select if you are planning to take a home loan"
+    )
+
+# ============================================================================
+# CALCULATION & RESULTS
+# ============================================================================
+
+if require_loan == "No":
+    ltv_percent = 0
+
+# Calculate affordability for all cities
+results = []
+for city_name, price_per_sqft in CITIES_DATA.items():
+    metrics = calculate_affordability(
+        annual_income, home_size, ltv_percent, annual_rate, tenure_years, price_per_sqft
+    )
+    results.append({
+        'City': city_name,
+        'Average Price (₹/sq ft)': f"₹{price_per_sqft:,.0f}",
+        'House Price (₹)': f"₹{metrics['House Price']:,.0f}",
+        'EMI/Month (₹)': f"₹{metrics['Monthly EMI']:,.0f}",
+        'P/I Ratio': f"{metrics['P/I Ratio']:.2f}",
+        'P/I Status': metrics['P/I Status'],
+        'EMI/Income %': f"{metrics['EMI/Income %']:.1f}%",
+        'EMI Status': metrics['EMI Status'],
+        'metrics': metrics  # Store raw metrics for coloring
+    })
+
+results_df = pd.DataFrame(results)
+
+# ============================================================================
+# OUTPUT SECTION - SUMMARY METRICS
+# ============================================================================
+
+st.markdown("---")
+st.markdown("### 📊 Your Affordability Summary")
+
+metric_col1, metric_col2, metric_col3, metric_col4 = st.columns(4)
+
+with metric_col1:
+    st.metric(
+        label="Monthly Income",
+        value=f"₹{annual_income/12:,.0f}",
+        delta=None
+    )
+
+with metric_col2:
+    st.metric(
+        label="Home Size",
+        value=f"{home_size:,.0f} sq ft",
+        delta=None
+    )
+
+with metric_col3:
+    st.metric(
+        label="Loan Tenure",
+        value=f"{tenure_years} years",
+        delta=None
+    )
+
+with metric_col4:
+    st.metric(
+        label="Interest Rate",
+        value=f"{annual_rate}% p.a.",
+        delta=None
+    )
+
+# ============================================================================
+# RESULTS TABLE
+# ============================================================================
+
+st.markdown("---")
+st.markdown("### 🏙️ City-wise Affordability Analysis")
+
+# Create a display dataframe without the 'metrics' column
+display_df = results_df.drop('metrics', axis=1)
+
+# Color function for display
+def color_code_row(row):
+    """Apply color coding to table cells based on affordability"""
+    colors = [''] * len(row)
+    
+    # Find index of P/I Status and EMI Status columns
+    pi_status_idx = list(row.index).index('P/I Status')
+    emi_status_idx = list(row.index).index('EMI Status')
+    
+    # Get actual metric data
+    city = row['City']
+    metric = next((m['metrics'] for m in results if m['City'] == city), None)
+    
+    if metric:
+        # P/I Status coloring
+        if metric['P/I Status'] == 'Affordable':
+            colors[pi_status_idx] = 'background-color: #90EE90'  # Light green
+        elif metric['P/I Status'] == 'Mid':
+            colors[pi_status_idx] = 'background-color: #FFD700'  # Gold
+        else:
+            colors[pi_status_idx] = 'background-color: #FFB6C6'  # Light red
+        
+        # EMI Status coloring
+        if metric['EMI Status'] == 'Comfortable':
+            colors[emi_status_idx] = 'background-color: #90EE90'  # Light green
+        else:
+            colors[emi_status_idx] = 'background-color: #FFB6C6'  # Light red
+    
+    return colors
+
+styled_df = display_df.style.apply(color_code_row, axis=1)
+st.dataframe(styled_df, use_container_width=True, height=600)
+
+# ============================================================================
+# KEY INSIGHTS
+# ============================================================================
+
+st.markdown("---")
+st.markdown("### 💡 Key Insights")
+
+# Filter affordable cities
+affordable_cities = [r for r in results if r['metrics']['P/I Status'] == 'Affordable' 
+                     and r['metrics']['EMI Status'] == 'Comfortable']
+mid_cities = [r for r in results if r['metrics']['P/I Status'] == 'Mid']
+unaffordable_cities = [r for r in results if r['metrics']['P/I Status'] == 'Unaffordable']
+
+col1, col2, col3 = st.columns(3)
+
+with col1:
+    st.markdown(f"""
+    <div style='background-color: #90EE90; padding: 15px; border-radius: 8px; text-align: center;'>
+        <h3>✅ Affordable & Comfortable</h3>
+        <p style='font-size: 24px; font-weight: bold; margin: 10px 0;'>{len(affordable_cities)}</p>
+        <p style='font-size: 12px; margin: 0;'>
+            {', '.join([c['City'] for c in affordable_cities[:3]])}
+            {f"... & {len(affordable_cities)-3} more" if len(affordable_cities) > 3 else ""}
+        </p>
+    </div>
+    """, unsafe_allow_html=True)
+
+with col2:
+    st.markdown(f"""
+    <div style='background-color: #FFD700; padding: 15px; border-radius: 8px; text-align: center;'>
+        <h3>⚠️ Mid-Range</h3>
+        <p style='font-size: 24px; font-weight: bold; margin: 10px 0;'>{len(mid_cities)}</p>
+        <p style='font-size: 12px; margin: 0;'>
+            {', '.join([c['City'] for c in mid_cities[:3]])}
+            {f"... & {len(mid_cities)-3} more" if len(mid_cities) > 3 else ""}
+        </p>
+    </div>
+    """, unsafe_allow_html=True)
+
+with col3:
+    st.markdown(f"""
+    <div style='background-color: #FFB6C6; padding: 15px; border-radius: 8px; text-align: center;'>
+        <h3>❌ Unaffordable</h3>
+        <p style='font-size: 24px; font-weight: bold; margin: 10px 0;'>{len(unaffordable_cities)}</p>
+        <p style='font-size: 12px; margin: 0;'>
+            {', '.join([c['City'] for c in unaffordable_cities[:3]])}
+            {f"... & {len(unaffordable_cities)-3} more" if len(unaffordable_cities) > 3 else ""}
+        </p>
+    </div>
+    """, unsafe_allow_html=True)
+
+# ============================================================================
+# AFFORDABILITY RULES EXPLANATION
+# ============================================================================
+
+st.markdown("---")
+st.markdown("### 📚 Affordability Classification Rules")
+
+col1, col2 = st.columns(2)
+
+with col1:
+    st.markdown("""
+    **P/I Ratio (Price-to-Income Ratio)**
+    - **P/I ≤ 5** → Affordable (Green)
+    - **5 < P/I ≤ 8** → Mid-Range (Yellow)
+    - **P/I > 8** → Unaffordable (Red)
+    
+    *Lower P/I is better; it means the home price is manageable relative to your income.*
+    """)
+
+with col2:
+    st.markdown("""
+    **EMI-to-Income Ratio**
+    - **EMI/Income ≤ 50%** → Comfortable (Green)
+    - **EMI/Income > 50%** → High Stress (Red)
+    
+    *Lower EMI/Income ratio means your monthly EMI is manageable relative to monthly income.*
+    """)
+
+# ============================================================================
+# DOWNLOAD DATA
+# ============================================================================
+
+st.markdown("---")
+st.markdown("### 📥 Export Results")
+
+# Prepare downloadable CSV
+download_df = pd.DataFrame([
+    {
+        'City': r['City'],
+        'Average Price (₹/sq ft)': r['Average Price (₹/sq ft)'].replace('₹', '').replace(',', ''),
+        'House Price (₹)': r['House Price (₹)'].replace('₹', '').replace(',', ''),
+        'EMI/Month (₹)': r['EMI/Month (₹)'].replace('₹', '').replace(',', ''),
+        'P/I Ratio': r['P/I Ratio'],
+        'P/I Status': r['P/I Status'],
+        'EMI/Income %': r['EMI/Income %'],
+        'EMI Status': r['EMI Status'],
+    }
+    for r in results
+])
+
+csv = download_df.to_csv(index=False)
+st.download_button(
+    label="📊 Download Results as CSV",
+    data=csv,
+    file_name=f"Housing_Affordability_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+    mime="text/csv",
+    help="Download your affordability analysis in CSV format"
+)
+
+# ============================================================================
+# FOOTER
+# ============================================================================
+
+st.markdown("---")
+st.markdown("""
+<div style='text-align: center; padding: 20px; color: #999; font-size: 12px;'>
+    <p>🏠 Housing Affordability Index | Magicbricks Research</p>
+    <p>Built with Streamlit | Data accurate as of Jan 2026</p>
+</div>
+""", unsafe_allow_html=True)
